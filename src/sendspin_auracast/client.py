@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import sys
 import uuid
 from dataclasses import dataclass
@@ -11,9 +12,12 @@ from typing import Protocol
 
 DEFAULT_URL = "ws://localhost:8927/sendspin"
 DEFAULT_CLIENT_NAME = "sendspin_auracast"
+DEFAULT_BROADCAST_NAME = "Sendspin Auracast"
 DEFAULT_PREVIEW_BYTES = 32
 DEFAULT_BUFFER_CAPACITY = 2 * 1024 * 1024
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 10.0
+DEFAULT_SENDSPIN_BUFFER_MS = 100
+DEFAULT_QUEUE_SIZE = 20
 
 
 class PCMFormatLike(Protocol):
@@ -69,7 +73,7 @@ def format_audio_chunk(
 def build_parser() -> argparse.ArgumentParser:
     """Build the command-line argument parser."""
     parser = argparse.ArgumentParser(
-        description="Receive Sendspin audio data and print it to the terminal."
+        description="Broadcast Sendspin audio over Bluetooth LE Audio."
     )
     parser.add_argument(
         "url",
@@ -88,15 +92,93 @@ def build_parser() -> argparse.ArgumentParser:
         help="Friendly client name to advertise to the Sendspin server.",
     )
     parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Enable verbose logging.",
+    )
+    parser.add_argument(
+        "-t",
+        "--transport",
+        default="usb:0",
+        metavar="SPEC",
+        help="Bumble transport used for Auracast broadcast. Defaults to usb:0.",
+    )
+    parser.add_argument(
+        "-n",
+        "--name",
+        default=DEFAULT_BROADCAST_NAME,
+        help="Auracast broadcast name visible to receivers.",
+    )
+    parser.add_argument(
+        "-c",
+        "--code",
+        metavar="PASSWORD",
+        help="Optional Auracast encryption password, max 16 characters.",
+    )
+    parser.add_argument(
+        "--broadcast-id",
+        type=lambda value: int(value, 0),
+        default=0x123456,
+        help="Auracast broadcast ID. Accepts decimal or 0x-prefixed hex.",
+    )
+    parser.add_argument(
+        "--bitrate",
+        type=int,
+        default=80_000,
+        help="LC3 bitrate in bits per second per channel.",
+    )
+    parser.add_argument(
+        "--sendspin-buffer-ms",
+        type=int,
+        default=DEFAULT_SENDSPIN_BUFFER_MS,
+        help=(
+            "Advertised Sendspin player buffer in milliseconds. "
+            f"Defaults to {DEFAULT_SENDSPIN_BUFFER_MS}."
+        ),
+    )
+    parser.add_argument(
+        "--queue-size",
+        type=int,
+        default=DEFAULT_QUEUE_SIZE,
+        help=(
+            "Maximum local Sendspin chunks queued before stale audio is dropped. "
+            f"Defaults to {DEFAULT_QUEUE_SIZE}."
+        ),
+    )
+    parser.add_argument(
+        "--presentation-delay-us",
+        type=int,
+        default=40_000,
+        help="Auracast presentation delay in microseconds. Defaults to 40000.",
+    )
+    parser.add_argument(
+        "--max-transport-latency-ms",
+        type=int,
+        default=65,
+        help="Auracast BIG max transport latency in milliseconds. Defaults to 65.",
+    )
+    parser.add_argument(
+        "--manufacturer-data",
+        action="append",
+        metavar="COMPANY_ID:HEX_DATA",
+        help="Manufacturer-specific advertising data. Can be repeated.",
+    )
+    parser.add_argument(
         "--preview-bytes",
         type=int,
         default=DEFAULT_PREVIEW_BYTES,
-        help="Number of audio bytes to show per chunk when printing text.",
+        help="Number of audio bytes to show per chunk in --print mode.",
+    )
+    parser.add_argument(
+        "--print",
+        action="store_true",
+        help="Print received audio chunk summaries instead of broadcasting.",
     )
     parser.add_argument(
         "--raw",
         action="store_true",
-        help="Write raw audio bytes to stdout instead of text summaries.",
+        help="Write raw Sendspin audio bytes to stdout instead of broadcasting.",
     )
     parser.add_argument(
         "--connect-timeout",
@@ -175,13 +257,39 @@ async def run_client(config: ClientConfig) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run the terminal client."""
+    """Run the Sendspin Auracast CLI."""
+    from sendspin_auracast.auracast_broadcaster import BroadcastConfig
+    from sendspin_auracast.sendspin_bridge import (
+        SendspinAuracastConfig,
+        broadcast_until_stopped,
+        parse_manufacturer_data,
+    )
+
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.preview_bytes < 0:
         parser.error("--preview-bytes must be zero or greater")
     if args.connect_timeout <= 0:
         parser.error("--connect-timeout must be greater than zero")
+    if args.bitrate <= 0:
+        parser.error("--bitrate must be greater than zero")
+    if args.sendspin_buffer_ms <= 0:
+        parser.error("--sendspin-buffer-ms must be greater than zero")
+    if args.queue_size <= 0:
+        parser.error("--queue-size must be greater than zero")
+    if args.presentation_delay_us <= 0:
+        parser.error("--presentation-delay-us must be greater than zero")
+    if args.max_transport_latency_ms <= 0:
+        parser.error("--max-transport-latency-ms must be greater than zero")
+    if args.code and len(args.code) > 16:
+        parser.error("--code must be 16 characters or fewer")
+    if args.raw and args.print:
+        parser.error("--raw and --print cannot be used together")
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(name)s: %(message)s",
+    )
 
     config = ClientConfig(
         url=args.url,
@@ -193,7 +301,40 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     try:
-        asyncio.run(run_client(config))
+        if args.raw or args.print:
+            asyncio.run(run_client(config))
+        else:
+            manufacturer_data = parse_manufacturer_data(args.manufacturer_data)
+            broadcast_config = BroadcastConfig(
+                name=args.name,
+                broadcast_id=args.broadcast_id,
+                bitrate=args.bitrate,
+                presentation_delay_us=args.presentation_delay_us,
+                max_transport_latency_ms=args.max_transport_latency_ms,
+                broadcast_code=(
+                    args.code.encode().ljust(16, b"\x00")[:16]
+                    if args.code
+                    else None
+                ),
+                manufacturer_data=manufacturer_data,
+            )
+            asyncio.run(
+                broadcast_until_stopped(
+                    SendspinAuracastConfig(
+                        url=args.url,
+                        client_id=args.client_id,
+                        client_name=args.client_name,
+                        connect_timeout=args.connect_timeout,
+                        transport_spec=args.transport,
+                        broadcast=broadcast_config,
+                        sendspin_buffer_ms=args.sendspin_buffer_ms,
+                        queue_size=args.queue_size,
+                    )
+                )
+            )
+    except ValueError as err:
+        print(f"Invalid option: {err}", file=sys.stderr)
+        return 2
     except TimeoutError:
         print(
             f"Connection timed out after {config.connect_timeout:g} seconds.",

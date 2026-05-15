@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from sendspin_auracast.client import format_audio_chunk
+from sendspin_auracast.client import build_parser, format_audio_chunk
 
 
 @dataclass(frozen=True)
@@ -36,3 +36,23 @@ def test_format_audio_chunk() -> None:
         "timestamp_us=123456 bytes=4 codec=pcm pcm=48000Hz/2ch/16bit "
         "data=00 01 ..."
     )
+
+
+def test_build_parser_accepts_latency_options() -> None:
+    args = build_parser().parse_args(
+        [
+            "--sendspin-buffer-ms",
+            "50",
+            "--queue-size",
+            "8",
+            "--presentation-delay-us",
+            "20000",
+            "--max-transport-latency-ms",
+            "40",
+        ]
+    )
+
+    assert args.sendspin_buffer_ms == 50
+    assert args.queue_size == 8
+    assert args.presentation_delay_us == 20_000
+    assert args.max_transport_latency_ms == 40
