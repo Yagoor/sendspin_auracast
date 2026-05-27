@@ -49,6 +49,8 @@ def test_build_parser_accepts_latency_options() -> None:
             "20000",
             "--max-transport-latency-ms",
             "40",
+            "--initial-volume",
+            "35",
         ]
     )
 
@@ -56,3 +58,4 @@ def test_build_parser_accepts_latency_options() -> None:
     assert args.queue_size == 8
     assert args.presentation_delay_us == 20_000
     assert args.max_transport_latency_ms == 40
+    assert args.initial_volume == 35
