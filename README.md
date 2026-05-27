@@ -117,6 +117,7 @@ Use the GitHub Actions workflow `Prepare Release` to create a PyPI release. It:
 - pushes the commit and tag
 - creates a GitHub Release
 
-The existing `Publish to PyPI` workflow publishes when the new `v*` tag is
-pushed. Make sure the repository's PyPI trusted publishing settings are
-configured for the `release` environment before using it.
+The `Publish to PyPI` workflow runs automatically after `Prepare Release`
+completes successfully and publishes the exact release commit. Make sure the
+repository's PyPI trusted publishing settings are configured for the `release`
+environment before using it.
