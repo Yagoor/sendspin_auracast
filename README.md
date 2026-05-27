@@ -94,8 +94,29 @@ Build the package:
 python -m build
 ```
 
+Prepare a release locally:
+
+```bash
+python scripts/prepare_release.py 0.2.0
+```
+
 Publish to PyPI:
 
 ```bash
+twine check dist/*
 twine upload dist/*
 ```
+
+## Releases
+
+Use the GitHub Actions workflow `Prepare Release` to create a PyPI release. It:
+
+- updates `pyproject.toml` to the requested version
+- runs lint, tests, `python -m build`, and `twine check`
+- commits the version bump and creates a `v*` tag
+- pushes the commit and tag
+- creates a GitHub Release
+
+The existing `Publish to PyPI` workflow publishes when the new `v*` tag is
+pushed. Make sure the repository's PyPI trusted publishing settings are
+configured for the `release` environment before using it.
