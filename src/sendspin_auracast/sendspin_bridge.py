@@ -18,6 +18,7 @@ from sendspin_auracast.auracast_broadcaster import (
 from sendspin_auracast.client import (
     DEFAULT_CLIENT_NAME,
     DEFAULT_CONNECT_TIMEOUT_SECONDS,
+    DEFAULT_INITIAL_VOLUME,
     DEFAULT_QUEUE_SIZE,
     DEFAULT_SENDSPIN_BUFFER_MS,
     DEFAULT_URL,
@@ -37,8 +38,31 @@ class SendspinAuracastConfig:
     connect_timeout: float = DEFAULT_CONNECT_TIMEOUT_SECONDS
     transport_spec: str = "usb:0"
     broadcast: BroadcastConfig = field(default_factory=BroadcastConfig)
+    initial_volume: int = DEFAULT_INITIAL_VOLUME
     sendspin_buffer_ms: int = DEFAULT_SENDSPIN_BUFFER_MS
     queue_size: int = DEFAULT_QUEUE_SIZE
+
+
+@dataclass(slots=True)
+class PlayerAudioState:
+    """Local player volume and mute state mirrored from Sendspin commands."""
+
+    volume: int = 100
+    muted: bool = False
+
+    def apply(self, samples: np.ndarray) -> np.ndarray:
+        """Apply mute/volume to PCM samples without mutating the input frame."""
+        if samples.dtype != np.int16:
+            raise ValueError("samples must use int16 PCM")
+        if self.muted:
+            return np.zeros_like(samples)
+        if self.volume >= 100:
+            return samples.astype(np.int16, copy=True)
+        if self.volume <= 0:
+            return np.zeros_like(samples)
+
+        scaled = np.rint(samples.astype(np.float32) * (self.volume / 100.0))
+        return np.clip(scaled, -32768, 32767).astype(np.int16)
 
 
 class PcmFrameBuffer:
@@ -164,7 +188,7 @@ def convert_channels(samples: np.ndarray, target_channels: int) -> np.ndarray:
 async def run_sendspin_auracast(config: SendspinAuracastConfig) -> None:
     """Receive Sendspin PCM audio and broadcast it over Auracast."""
     from aiosendspin.client import SendspinClient
-    from aiosendspin.models import AudioCodec, PlayerCommand, Roles
+    from aiosendspin.models import AudioCodec, PlayerCommand, PlayerStateType, Roles
     from aiosendspin.models.player import (
         ClientHelloPlayerSupport,
         SupportedAudioFormat,
@@ -177,6 +201,7 @@ async def run_sendspin_auracast(config: SendspinAuracastConfig) -> None:
         channels=config.broadcast.channels,
         samples_per_frame=broadcaster.samples_per_frame,
     )
+    player_audio_state = PlayerAudioState(volume=config.initial_volume)
     audio_queue: asyncio.Queue[tuple[int, bytes, AudioFormatLike] | None] = (
         asyncio.Queue(maxsize=config.queue_size)
     )
@@ -205,6 +230,7 @@ async def run_sendspin_auracast(config: SendspinAuracastConfig) -> None:
         client_name=config.client_name,
         roles=[Roles.PLAYER],
         player_support=player_support,
+        initial_volume=config.initial_volume,
         state_supported_commands=[PlayerCommand.SET_STATIC_DELAY],
     )
 
@@ -238,6 +264,43 @@ async def run_sendspin_auracast(config: SendspinAuracastConfig) -> None:
     client.add_audio_chunk_listener(handle_audio_chunk)
     client.add_disconnect_listener(disconnected.set)
 
+    async def publish_player_state() -> None:
+        if not client.connected:
+            return
+        await client.send_player_state(
+            state=PlayerStateType.SYNCHRONIZED,
+            volume=player_audio_state.volume,
+            muted=player_audio_state.muted,
+        )
+
+    def handle_server_command(payload: object) -> None:
+        player_cmd = getattr(payload, "player", None)
+        if player_cmd is None:
+            return
+
+        state_changed = False
+        if (
+            player_cmd.command == PlayerCommand.VOLUME
+            and player_cmd.volume is not None
+            and player_audio_state.volume != player_cmd.volume
+        ):
+            player_audio_state.volume = player_cmd.volume
+            state_changed = True
+            logger.info("Updated player volume to %d%%", player_audio_state.volume)
+        elif (
+            player_cmd.command == PlayerCommand.MUTE
+            and player_cmd.mute is not None
+            and player_audio_state.muted != player_cmd.mute
+        ):
+            player_audio_state.muted = player_cmd.mute
+            state_changed = True
+            logger.info("Updated player mute to %s", player_audio_state.muted)
+
+        if state_changed:
+            loop.create_task(publish_player_state())
+
+    client.add_server_command_listener(handle_server_command)
+
     async def pump_audio() -> None:
         while True:
             item = await audio_queue.get()
@@ -245,7 +308,7 @@ async def run_sendspin_auracast(config: SendspinAuracastConfig) -> None:
                 return
             _timestamp_us, audio_data, audio_format = item
             for frame in frame_buffer.add_chunk(audio_data, audio_format):
-                await broadcaster.send_audio_async(frame)
+                await broadcaster.send_audio_async(player_audio_state.apply(frame))
 
     pump_task = asyncio.create_task(pump_audio())
     try:

@@ -18,6 +18,7 @@ DEFAULT_BUFFER_CAPACITY = 2 * 1024 * 1024
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 10.0
 DEFAULT_SENDSPIN_BUFFER_MS = 100
 DEFAULT_QUEUE_SIZE = 20
+DEFAULT_INITIAL_VOLUME = 100
 
 
 class PCMFormatLike(Protocol):
@@ -45,6 +46,7 @@ class ClientConfig:
     preview_bytes: int
     raw: bool
     connect_timeout: float
+    initial_volume: int
 
 
 def format_audio_chunk(
@@ -186,6 +188,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_CONNECT_TIMEOUT_SECONDS,
         help="Seconds to wait for the initial WebSocket connection.",
     )
+    parser.add_argument(
+        "--initial-volume",
+        type=int,
+        default=DEFAULT_INITIAL_VOLUME,
+        help="Initial Sendspin player volume from 0 to 100. Defaults to 100.",
+    )
     return parser
 
 
@@ -218,6 +226,7 @@ async def run_client(config: ClientConfig) -> None:
         client_name=config.client_name,
         roles=[Roles.PLAYER],
         player_support=player_support,
+        initial_volume=config.initial_volume,
         state_supported_commands=[PlayerCommand.SET_STATIC_DELAY],
     )
 
@@ -271,6 +280,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--preview-bytes must be zero or greater")
     if args.connect_timeout <= 0:
         parser.error("--connect-timeout must be greater than zero")
+    if not 0 <= args.initial_volume <= 100:
+        parser.error("--initial-volume must be between 0 and 100")
     if args.bitrate <= 0:
         parser.error("--bitrate must be greater than zero")
     if args.sendspin_buffer_ms <= 0:
@@ -298,6 +309,7 @@ def main(argv: list[str] | None = None) -> int:
         preview_bytes=args.preview_bytes,
         raw=args.raw,
         connect_timeout=args.connect_timeout,
+        initial_volume=args.initial_volume,
     )
 
     try:
@@ -325,6 +337,7 @@ def main(argv: list[str] | None = None) -> int:
                         client_id=args.client_id,
                         client_name=args.client_name,
                         connect_timeout=args.connect_timeout,
+                        initial_volume=args.initial_volume,
                         transport_spec=args.transport,
                         broadcast=broadcast_config,
                         sendspin_buffer_ms=args.sendspin_buffer_ms,

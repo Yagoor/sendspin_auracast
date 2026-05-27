@@ -4,6 +4,7 @@ import numpy as np
 
 from sendspin_auracast.sendspin_bridge import (
     PcmFrameBuffer,
+    PlayerAudioState,
     parse_manufacturer_data,
     pcm_buffer_capacity_bytes,
     pcm_bytes_to_int16,
@@ -63,3 +64,22 @@ def test_pcm_buffer_capacity_bytes_from_milliseconds() -> None:
 
 def test_parse_manufacturer_data() -> None:
     assert parse_manufacturer_data(["0x0059:010203"]) == {0x0059: b"\x01\x02\x03"}
+
+
+def test_player_audio_state_scales_volume() -> None:
+    samples = np.array([[1000, -1000], [30001, -30001]], dtype=np.int16)
+
+    adjusted = PlayerAudioState(volume=50, muted=False).apply(samples)
+
+    np.testing.assert_array_equal(
+        adjusted,
+        np.array([[500, -500], [15000, -15000]], dtype=np.int16),
+    )
+
+
+def test_player_audio_state_mute_zeros_samples() -> None:
+    samples = np.array([[1000, -1000]], dtype=np.int16)
+
+    adjusted = PlayerAudioState(volume=100, muted=True).apply(samples)
+
+    np.testing.assert_array_equal(adjusted, np.zeros_like(samples))
