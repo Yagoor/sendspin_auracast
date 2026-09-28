@@ -6,8 +6,7 @@ import argparse
 import asyncio
 import logging
 import sys
-import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 
 DEFAULT_URL = "ws://localhost:8927/sendspin"
@@ -41,7 +40,6 @@ class ClientConfig:
     """Configuration for the terminal audio receiver."""
 
     url: str
-    client_id: str
     client_name: str
     preview_bytes: int
     raw: bool
@@ -82,11 +80,6 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="?",
         default=DEFAULT_URL,
         help=f"Sendspin WebSocket URL. Defaults to {DEFAULT_URL}.",
-    )
-    parser.add_argument(
-        "--client-id",
-        default=f"sendspin-auracast-{uuid.getnode():x}",
-        help="Stable client identifier to advertise to the Sendspin server.",
     )
     parser.add_argument(
         "--client-name",
@@ -205,6 +198,7 @@ async def run_client(config: ClientConfig) -> None:
         ClientHelloPlayerSupport,
         SupportedAudioFormat,
     )
+    from aiosendspin.noise import Identity, InMemoryClientPairingStore
 
     disconnected = asyncio.Event()
 
@@ -221,10 +215,23 @@ async def run_client(config: ClientConfig) -> None:
         supported_commands=[PlayerCommand.VOLUME, PlayerCommand.MUTE],
     )
 
+    pairing_store = InMemoryClientPairingStore()
+    pairing_config = await pairing_store.get_pairing_config()
+    await pairing_store.store_pairing_config(
+        replace(
+            pairing_config,
+            pairing_psk_enabled=False,
+            static_pin_enabled=False,
+            dynamic_pin_enabled=False,
+            unpaired_access_enabled=True,
+        )
+    )
+
     client = SendspinClient(
-        client_id=config.client_id,
+        identity=Identity.generate(),
         client_name=config.client_name,
         roles=[Roles.PLAYER],
+        pairing_store=pairing_store,
         player_support=player_support,
         initial_volume=config.initial_volume,
         state_supported_commands=[PlayerCommand.SET_STATIC_DELAY],
@@ -304,7 +311,6 @@ def main(argv: list[str] | None = None) -> int:
 
     config = ClientConfig(
         url=args.url,
-        client_id=args.client_id,
         client_name=args.client_name,
         preview_bytes=args.preview_bytes,
         raw=args.raw,
@@ -334,7 +340,6 @@ def main(argv: list[str] | None = None) -> int:
                 broadcast_until_stopped(
                     SendspinAuracastConfig(
                         url=args.url,
-                        client_id=args.client_id,
                         client_name=args.client_name,
                         connect_timeout=args.connect_timeout,
                         initial_volume=args.initial_volume,

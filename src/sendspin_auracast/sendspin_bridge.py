@@ -5,9 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
-import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 
@@ -33,7 +32,6 @@ class SendspinAuracastConfig:
     """Configuration for the Sendspin-to-Auracast bridge."""
 
     url: str = DEFAULT_URL
-    client_id: str = f"sendspin-auracast-{uuid.getnode():x}"
     client_name: str = DEFAULT_CLIENT_NAME
     connect_timeout: float = DEFAULT_CONNECT_TIMEOUT_SECONDS
     transport_spec: str = "usb:0"
@@ -188,11 +186,12 @@ def convert_channels(samples: np.ndarray, target_channels: int) -> np.ndarray:
 async def run_sendspin_auracast(config: SendspinAuracastConfig) -> None:
     """Receive Sendspin PCM audio and broadcast it over Auracast."""
     from aiosendspin.client import SendspinClient
-    from aiosendspin.models import AudioCodec, PlayerCommand, PlayerStateType, Roles
+    from aiosendspin.models import AudioCodec, PlayerCommand, Roles
     from aiosendspin.models.player import (
         ClientHelloPlayerSupport,
         SupportedAudioFormat,
     )
+    from aiosendspin.noise import Identity, InMemoryClientPairingStore
 
     broadcaster = AuracastBroadcaster(config.transport_spec, config.broadcast)
     await broadcaster.start_async()
@@ -225,10 +224,23 @@ async def run_sendspin_auracast(config: SendspinAuracastConfig) -> None:
         ),
         supported_commands=[PlayerCommand.VOLUME, PlayerCommand.MUTE],
     )
+    pairing_store = InMemoryClientPairingStore()
+    pairing_config = await pairing_store.get_pairing_config()
+    await pairing_store.store_pairing_config(
+        replace(
+            pairing_config,
+            pairing_psk_enabled=False,
+            static_pin_enabled=False,
+            dynamic_pin_enabled=False,
+            unpaired_access_enabled=True,
+        )
+    )
+
     client = SendspinClient(
-        client_id=config.client_id,
+        identity=Identity.generate(),
         client_name=config.client_name,
         roles=[Roles.PLAYER],
+        pairing_store=pairing_store,
         player_support=player_support,
         initial_volume=config.initial_volume,
         state_supported_commands=[PlayerCommand.SET_STATIC_DELAY],
@@ -268,7 +280,7 @@ async def run_sendspin_auracast(config: SendspinAuracastConfig) -> None:
         if not client.connected:
             return
         await client.send_player_state(
-            state=PlayerStateType.SYNCHRONIZED,
+            available=True,
             volume=player_audio_state.volume,
             muted=player_audio_state.muted,
         )

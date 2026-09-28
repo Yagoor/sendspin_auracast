@@ -1,10 +1,16 @@
+import asyncio
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import numpy as np
+from aiosendspin.models import PlayerCommand
+from aiosendspin.noise import InMemoryClientPairingStore
 
+import sendspin_auracast.sendspin_bridge as sendspin_bridge
 from sendspin_auracast.sendspin_bridge import (
     PcmFrameBuffer,
     PlayerAudioState,
+    SendspinAuracastConfig,
     parse_manufacturer_data,
     pcm_buffer_capacity_bytes,
     pcm_bytes_to_int16,
@@ -83,3 +89,97 @@ def test_player_audio_state_mute_zeros_samples() -> None:
     adjusted = PlayerAudioState(volume=100, muted=True).apply(samples)
 
     np.testing.assert_array_equal(adjusted, np.zeros_like(samples))
+
+
+def test_bridge_creates_ephemeral_client_and_publishes_player_state(
+    monkeypatch,
+) -> None:
+    sent_states = []
+    identities = []
+    pairing_stores = []
+
+    class FakeBroadcaster:
+        samples_per_frame = 1
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        async def start_async(self) -> None:
+            pass
+
+        async def stop_async(self) -> None:
+            pass
+
+        async def send_audio_async(self, _frame) -> None:
+            pass
+
+    class FakeSendspinClient:
+        def __init__(
+            self,
+            identity,
+            client_name,
+            roles,
+            *,
+            pairing_store,
+            player_support,
+            initial_volume,
+            state_supported_commands,
+        ) -> None:
+            identities.append(identity.peer_id)
+            pairing_stores.append(pairing_store)
+            self.connected = False
+            self._command_listeners = []
+            self._disconnect_listeners = []
+
+        def add_audio_chunk_listener(self, _listener) -> None:
+            pass
+
+        def add_disconnect_listener(self, listener) -> None:
+            self._disconnect_listeners.append(listener)
+
+        def add_server_command_listener(self, listener) -> None:
+            self._command_listeners.append(listener)
+
+        async def connect(self, _url) -> None:
+            self.connected = True
+            command = SimpleNamespace(
+                player=SimpleNamespace(
+                    command=PlayerCommand.VOLUME,
+                    volume=50,
+                    mute=None,
+                )
+            )
+            for listener in self._command_listeners:
+                listener(command)
+            await asyncio.sleep(0)
+            for listener in self._disconnect_listeners:
+                listener()
+
+        async def send_player_state(self, **state) -> None:
+            sent_states.append(state)
+
+        async def disconnect(self) -> None:
+            self.connected = False
+
+    monkeypatch.setattr(sendspin_bridge, "AuracastBroadcaster", FakeBroadcaster)
+    monkeypatch.setattr("aiosendspin.client.SendspinClient", FakeSendspinClient)
+
+    asyncio.run(sendspin_bridge.run_sendspin_auracast(SendspinAuracastConfig()))
+    asyncio.run(sendspin_bridge.run_sendspin_auracast(SendspinAuracastConfig()))
+
+    assert sent_states == [
+        {"available": True, "volume": 50, "muted": False},
+        {"available": True, "volume": 50, "muted": False},
+    ]
+    assert len(identities) == 2
+    assert identities[0] != identities[1]
+    assert pairing_stores[0] is not pairing_stores[1]
+    assert all(
+        isinstance(store, InMemoryClientPairingStore) for store in pairing_stores
+    )
+    for store in pairing_stores:
+        pairing_config = asyncio.run(store.get_pairing_config())
+        assert pairing_config.unpaired_access_enabled
+        assert not pairing_config.pairing_psk_enabled
+        assert not pairing_config.static_pin_enabled
+        assert not pairing_config.dynamic_pin_enabled
